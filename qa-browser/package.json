@@ -1,0 +1,8 @@
+{
+  "name": "pathwise-browser",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@playwright/mcp": "0.0.80"
+  }
+}

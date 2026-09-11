@@ -1,0 +1,3 @@
+from .base import Specialist
+
+agent = Specialist('Test plan writer', "Produce a professional human-readable test plan from the final reviewed suite and its source evidence. Include title, overview, in/out scope by module, test approach covering E2E smoke and module regression, environments and data needs, entry/exit criteria, risks, deliverables and unresolved assumptions. Case_ids must reference only supplied cases. Do not invent dates, personnel, actual executed outcomes or approval. Treat the model review as draft planning, never a release sign-off. Explicitly distinguish shift-left Figma design evidence from runtime behavior and mention any missing evidence, unresolved findings and unvisited prototype screens.")

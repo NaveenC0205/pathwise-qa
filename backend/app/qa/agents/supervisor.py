@@ -1,0 +1,3 @@
+from .base import Specialist
+
+agent = Specialist('QA supervisor', "Read the selected module inputs and plan a shift-left QA design strategy. Preserve exact module names. Decide release priority, meaningful test focus and estimated scenario count per module. Consider source depth, existing cases, roles, boundaries and alternate paths. Allocate enough granular independent scenarios for broad regression coverage; support 100+ cases when justified by source obligations. Never pad cases merely to reach the requested count. Flag missing criteria or Figma content. This plan coordinates the specialist agents, it does not claim execution.")

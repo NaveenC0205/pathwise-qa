@@ -1,0 +1,4 @@
+- generic [active] [ref=f1e1]:
+  - heading "Catalog" [level=1] [ref=f1e2]
+  - link "Product details" [ref=f1e3] [cursor=pointer]:
+    - /url: /product

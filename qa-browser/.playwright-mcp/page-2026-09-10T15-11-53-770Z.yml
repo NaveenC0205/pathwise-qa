@@ -1,0 +1,5 @@
+- generic [active] [ref=e1]:
+  - heading "Home" [level=1] [ref=e2]
+  - link "Catalog" [ref=e3] [cursor=pointer]:
+    - /url: /catalog
+  - button "Delete account" [ref=e4]
