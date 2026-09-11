@@ -76,7 +76,7 @@ class Requirement(StrictModel):
     id: str = Field(min_length=1)
     module: str = Field(min_length=1)
     text: str = Field(min_length=1)
-    source: Literal['story', 'success_criteria', 'confluence', 'figma', 'ui']
+    source: Literal['story', 'success_criteria', 'navigation', 'confluence', 'figma', 'ui']
     source_quote: str = Field(min_length=1)
     evidence_ids: list[str] = Field(default_factory=list)
     critical: bool
@@ -180,6 +180,9 @@ class ModuleStrategy(StrictModel):
 
 
 class Strategy(StrictModel):
+    application_understanding: str = ''
+    smoke_approach: list[str] = Field(default_factory=list)
+    regression_approach: list[str] = Field(default_factory=list)
     modules: list[ModuleStrategy]
     decisions: list[str]
     gaps: list[str]

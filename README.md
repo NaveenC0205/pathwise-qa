@@ -23,8 +23,10 @@ Open http://127.0.0.1:5174/. The application is independent of RetailMind and Sh
 2. Import existing `.csv` or `.xlsx` cases. A Module column assigns rows to matching modules; unmatched modules are created for you to complete. Rows without a module belong to the active module. Review file/row references and import warnings.
 3. Select a server-enabled model and an optional scenario planning target (100, 200 or 500+). Targets guide planning; unsupported filler is not counted as coverage.
 4. Optionally enable per-module Figma exploration. No deployed application is required.
-5. Follow real agent events through generation and review/repair. A run can be stopped. Large module batches have a 60-minute overall limit.
-6. Review suites, step-level expected results, source-line traceability, navigation journeys, existing-case assessments, unresolved findings and the test plan. Export filtered CSV, full JSON or test-plan Markdown.
+5. Click **Analyze modules & propose test strategy**. Live agents explain the application, requirements, source quotes, navigation and proposed smoke/regression coverage. No test cases are generated at this stage.
+6. Edit the understanding and strategy, add corrections, and explicitly approve. Source edits require a new analysis. The saved LangGraph checkpoint resumes into generation only after approval.
+7. Follow real model events through generation and review/repair. Large module batches have a 60-minute overall limit.
+8. Review suites, step-level expected results, source-line traceability, navigation journeys, existing-case assessments, unresolved findings and the test plan. Export filtered CSV, full JSON or test-plan Markdown.
 
 ## Seven specialist agents
 
@@ -40,7 +42,7 @@ Each agent is defined separately in `backend/app/qa/agents/`:
 | Coverage reviewer | `reviewer.py` | Semantic review, imported-case assessment, missing obligations and repair requests |
 | Test plan writer | `test_plan.py` | Scope, approach, environments, entry/exit criteria, risks and deliverables |
 
-`browser_decision.py` is the Figma explorer's bounded next-action policy, not an additional claimed specialist. `pipeline.py` coordinates dependencies, two concurrent model calls, small regression batches, structured-output correction and up to two designer repair rounds. Source-line omissions trigger an additional analyst pass. Model responses never execute Python, shell or arbitrary browser code.
+`browser_decision.py` is the Figma explorer's bounded next-action policy, not an additional claimed specialist. `workflow.py` uses a compiled LangGraph StateGraph with a durable SQLite checkpoint and human-approval interrupt. Each specialist runs a LangGraph reasoning/validation/correction loop in `agents/runtime.py`. `pipeline.py` coordinates dependencies, two concurrent model calls, small regression batches, structured-output correction and up to two designer repair rounds. Source-line omissions trigger an additional analyst pass. Model responses never execute Python, shell or arbitrary browser code.
 
 ## Figma evidence
 
@@ -58,7 +60,7 @@ References: [Figma file endpoints](https://developers.figma.com/docs/rest-api/fi
 
 The engine supports suites over 100 cases through module batches, not one giant model response. Input bounds: 20 modules, 180,000 combined module characters, 200 imported cases per file, 2 MB files, and 100 atomic requirements per analysis response. Oversized analysis is not silently accepted as complete. Model/provider/context limits and semantic ambiguity may still require splitting a project.
 
-Offline mode is transparent template scaffolding. Live mode is the actual specialist-model workflow. All cases remain drafts and include names, descriptions, module, suite, testing type, priority, level, role, setup, data, per-step expected results, overall result, traceability, provenance and assumptions. Neither mode executes generated tests or guarantees exhaustive correctness. A fully linked matrix is not a QA approval.
+The UI and API accept live model runs only; missing credentials or provider failures return errors, never template cases. The old offline helper remains solely for regression fixtures and is not exposed by the API. All cases remain drafts and include names, descriptions, module, suite, testing type, priority, level, role, setup, data, per-step expected results, overall result, traceability, provenance and assumptions. The application does not execute generated tests or guarantees exhaustive correctness. A fully linked matrix is not a QA approval.
 
 ## Validation
 
@@ -68,8 +70,19 @@ npm --prefix frontend test
 npm --prefix frontend run build
 ```
 
-Tests cover module isolation, exact source inventories, 100+ case output, imports (CSV and XLSX), formula exclusion, reference validation, streamed events, existing-case assessment, deterministic coverage repair and browser action restrictions. Local browser checks cover the editor, offline generation, documentation, CSV import and mobile layout. Playwright MCP is checked against a local navigation fixture. Real Figma account access is not verified without a supplied accessible design.
+Tests cover module isolation, exact source inventories, 100+ case output, imports (CSV and XLSX), formula exclusion, reference validation, streamed events, existing-case assessment, deterministic coverage repair and browser action restrictions. Workflow tests additionally verify that designers never run before approval, SQLite state survives reopening, approved edits reach generation, and invalid citations or model failures cannot produce a successful draft. Playwright MCP is checked against a local navigation fixture. Real Figma account access is not verified without a supplied accessible design.
 
 ## Deployment scope
 
-This is a local, single-user tool. Inputs/results are held for the active run and downloadable; projects and run history are not persisted. Bind to loopback by default. Before shared hosting, add identity, per-user model budgets, persistent project storage and stronger outbound browser isolation. The Python service and Playwright runtime require Python-capable hosting; this is not a static-only Sites deployment.
+This is a local, single-user tool. Workflow inputs, analyses, approved interpretations and completed results are saved under `outputs/agent-checkpoints.sqlite` (ignored by Git). The browser remembers the latest run ID to restore pending approval after refresh. Unsaved edits are not persisted. Failed generation can retry from the approved checkpoint; the generation stage restarts, while approved analysis stays fixed. Run a single API worker: the local duplicate-resume lock is process-local. Bind to loopback by default. Before shared hosting, add identity, per-user model budgets, persistent project storage and stronger outbound browser isolation. The Python service and Playwright runtime require Python-capable hosting; this is not a static-only Sites deployment.
+
+## Framework and API
+
+- `POST /api/qa/generate/stream`: starts live analysis and returns an `awaiting_approval` run.
+- `GET /api/qa/runs/{run_id}`: retrieves the saved run.
+- `POST /api/qa/runs/{run_id}/approve/stream`: validates reviewed requirements, navigation and strategy, then resumes the LangGraph interrupt with explicit approval.
+- `POST /api/qa/runs/{run_id}/retry/stream`: retries a failed generation stage using its saved approval; it cannot bypass initial approval.
+- Agent decisions, repair events and model identity stream to the UI as newline-delimited JSON. This is stage/event streaming, not token-by-token text streaming.
+- No LangSmith tracing or third-party tracing is enabled by this application.
+
+Framework reference: [LangGraph interrupts and resuming saved state](https://docs.langchain.com/oss/python/langgraph/interrupts).

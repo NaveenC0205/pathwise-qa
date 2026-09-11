@@ -3,7 +3,7 @@ def inventory(body, requirements):
     rows = []
     for module in body.modules or [body]:
         name = getattr(module, 'name', 'General')
-        for source in ('story', 'success_criteria', 'confluence', 'figma'):
+        for source in ('story', 'success_criteria', 'navigation', 'confluence', 'figma'):
             for index, raw in enumerate(getattr(module, source).splitlines(), 1):
                 text = raw.strip()
                 if not text or text.startswith('#'): continue

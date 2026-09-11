@@ -6,6 +6,18 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from app.api.qa import QAInput, router
 from app.qa.pipeline import run_plan
+from app.qa.workflow import build_graph
+from langgraph.checkpoint.memory import InMemorySaver
+from langgraph.types import Command
+
+
+async def approved_run(body, emit=None, llm=None):
+    from app.qa.pipeline import noop
+    graph = build_graph(InMemorySaver(), emit or noop, llm)
+    cfg = {'configurable': {'thread_id': 'test'}}
+    state = await graph.ainvoke({'input': body.model_dump()}, cfg)
+    analysis = state['analysis']
+    return (await graph.ainvoke(Command(resume={'approved': True, 'requirements': analysis['requirements'], 'navigation': analysis['navigation'], 'strategy': analysis['strategy']}), cfg))['result']
 from app.qa.models import Case, ModuleInput
 from app.qa.imports import import_cases
 from app.qa.browser import candidates, check_target
@@ -112,7 +124,7 @@ class FakeRouter:
 async def test_five_agent_loop_repairs_missing_obligation():
     events = []
     async def emit(e): events.append(e)
-    result = await run_plan(QAInput(modules=[module()], mode='live'), emit, FakeRouter())
+    result = await approved_run(QAInput(modules=[module()], mode='live'), emit, FakeRouter())
     assert result['repairs'] == 1
     assert result['review_history'][0]['findings'][0]['id'] == 'COV-R1:Negative'
     assert result['coverage']['missing'] == 0
@@ -123,13 +135,13 @@ async def test_five_agent_loop_repairs_missing_obligation():
 @pytest.mark.asyncio
 async def test_live_rejects_unknown_references():
     with pytest.raises(ValueError, match='unknown requirement'):
-        await run_plan(QAInput(modules=[module()], mode='live'), llm=FakeRouter(invalid=True))
+        await approved_run(QAInput(modules=[module()], mode='live'), llm=FakeRouter(invalid=True))
 
 
 @pytest.mark.asyncio
 async def test_existing_cases_are_assessed_without_claiming_execution():
     m = module(); m['existing_cases'] = import_cases(b'Name,Steps\nOpen product,Click product', 'prior.csv')['cases']
-    result = await run_plan(QAInput(modules=[m], mode='live'), llm=FakeRouter())
+    result = await approved_run(QAInput(modules=[m], mode='live'), llm=FakeRouter())
     assert result['existing_case_reviews'][0]['disposition'] == 'Improve'
     assert result['existing_cases'][0]['source_row'] == 2
 
@@ -137,10 +149,8 @@ async def test_existing_cases_are_assessed_without_claiming_execution():
 def test_api_stream_and_import():
     app = FastAPI(); app.include_router(router); client = TestClient(app)
     response = client.post('/api/qa/generate/stream', json={'modules': [module()], 'mode': 'offline'})
-    rows = [json.loads(line) for line in response.text.splitlines()]
-    assert rows[0]['type'] == 'event'
-    assert rows[-1]['type'] == 'result'
-    assert rows[-1]['result']['coverage']['smoke'] > 0
+    assert response.status_code == 422
+    assert 'disabled' in response.json()['detail']
     response = client.post('/api/qa/import-cases', files={'file': ('cases.csv', b'Name,Steps,Expected Result\nOpen,Click,Page visible', 'text/csv')})
     assert response.status_code == 200
     assert response.json()['count'] == 1
@@ -153,7 +163,7 @@ async def test_large_suite_and_line_inventory():
         m['success_criteria'] = 'A required name is validated.\nQuantity must be between 1 and 10.'
     result = await run_plan(QAInput(modules=inputs, mode='offline'))
     assert len(result['cases']) >= 100
-    assert len(result['source_lines']) == 60
+    assert len(result['source_lines']) == 80
     assert len({c['id'] for c in result['cases']}) == len(result['cases'])
     assert result['test_plan']['entry_criteria']
 

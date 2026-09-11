@@ -1,15 +1,13 @@
 import asyncio
-import json
 import re
 from .models import Requirements, Navigation, Cases, Review, Finding, Strategy, TestPlan
 from .agents import AGENTS
-from .agents.base import BASE
+from .agents.runtime import invoke_specialist
 from .coverage import validate_references, coverage_report, missing_findings
 from .offline import draft
 from .browser import explore
 from .figma import read_design
 from .line_coverage import inventory
-from app.llm import CompletionRequest
 from app.llm import LLMRouter
 
 ROLES = ['QA supervisor', 'Requirements analyst', 'Figma explorer', 'Smoke designer', 'Regression designer', 'Coverage reviewer', 'Test plan writer']
@@ -48,27 +46,7 @@ class Team:
         role = 'Figma explorer' if name == 'Browser decision' else name
         async with self.slots:
             await self.event(role, 'Running', f"{'Choosing the next UI action' if name == 'Browser decision' else 'Analyzing evidence and generating structured output'}{': ' + context['batch_label'] if context.get('batch_label') else ''}")
-            problem = None
-            prior_output = None
-            for attempt in range(2):
-                payload = {'schema': schema.model_json_schema(), 'context': context}
-                if problem:
-                    payload['correction'] = 'Previous output was invalid. Fix the exact problem below and return corrected complete JSON: ' + problem
-                    payload['previous_output'] = prior_output
-                completion = await self.llm.complete(CompletionRequest(system=BASE + '\n' + instructions, prompt=json.dumps(payload), max_tokens=14000 if schema == Cases else 9000, purpose='qa_' + name))
-                if completion.provider.startswith('mock'):
-                    raise ValueError('A mock fallback cannot fulfill a live QA agent run.')
-                try:
-                    raw = re.sub(r'^```(?:json)?\s*|\s*```$', '', completion.text.strip())
-                    parsed = schema.model_validate_json(raw)
-                    if validate: validate(parsed)
-                    await self.event(role, 'Running' if name == 'Browser decision' else 'Complete', f'Validated response · {completion.model}', model=completion.model)
-                    return parsed
-                except ValueError as exc:
-                    problem = str(exc)[:2400]
-                    prior_output = completion.text
-                    await self.event(role, 'Repairing', 'Correcting invalid structured output or traceability references.')
-            raise ValueError(f'{name} returned invalid output after correction: {problem[:220]}')
+            return await invoke_specialist(self, name, instructions, schema, context, validate, role)
 
 
 def check_sources(reqs, body, evidence):
@@ -108,7 +86,7 @@ def assign_ids(cases):
         c.id = ('SMK' if c.suite == 'Smoke' else 'REG') + f'-{counters[c.suite]:03}'
 
 
-async def run_plan(body, emit=noop, llm=None):
+async def run_plan(body, emit=noop, llm=None, *, approved=None):
     team = Team(emit, llm)
     gaps, evidence, decisions, findings = [], [], [], []
     review_history = []
@@ -131,57 +109,79 @@ async def run_plan(body, emit=noop, llm=None):
     else:
         team.llm = team.llm or LLMRouter(body.model)
         if team.llm.provider_name.startswith('mock'):
-            raise ValueError('Live agents require a real configured model. Use Offline draft or configure the server provider.')
-        context = body.model_dump(exclude={'mode', 'max_actions', 'max_repairs'})
-        def check_strategy(plan):
-            names = {m.name for m in body.modules}
-            if names and {m.module for m in plan.modules} != names: raise ValueError('Plan exactly the selected module names.')
-        strategy = await team.ask('QA supervisor', Strategy, context, check_strategy)
-        context['strategy'] = strategy.model_dump()
-        gaps.extend(strategy.gaps)
-        if body.explore_ui:
-            enriched = []
-            for module in body.modules:
-                current = module.model_copy(deep=True)
-                if module.figma_url:
-                    await team.event('Figma explorer', 'Running', f'Reading design evidence for {module.name}.')
-                    try:
-                        text, count, source_gaps = await read_design(module.figma_url)
-                        current.figma = (current.figma + '\n' + text).strip()
-                        gaps.extend(f'{module.name}: {g}' for g in source_gaps)
-                        await team.event('Figma explorer', 'Running', f'{module.name}: extracted {count} design nodes.')
-                    except ValueError as exc:
-                        gaps.append(f'{module.name}: {exc}')
-                    except Exception:
-                        gaps.append(f'{module.name}: Figma design API unavailable. Pasted design content remains usable.')
-                    try:
-                        explore_body = body.model_copy(update={'target_url': module.figma_url})
-                        observed, actions, browser_gaps = await explore(explore_body, team.ask, lambda e: team.event(**e))
-                        prefix = module.id + '-'
-                        for e in observed: e['id'] = prefix + e['id']; e['module'] = module.name
-                        for d in actions: d['evidence_id'] = prefix + d['evidence_id']
-                        evidence.extend(observed); decisions.extend(actions)
-                        gaps.extend(f'{module.name}: {g}' for g in browser_gaps)
-                    except Exception:
-                        gaps.append(f'{module.name}: prototype/browser exploration unavailable. Private or canvas-only designs require the API or an export.')
-                else:
-                    gaps.append(f'{module.name}: no Figma URL; using pasted design evidence only.')
-                enriched.append(current)
-            body = body.model_copy(update={'modules': enriched})
-            context.update(body.model_dump(exclude={'mode', 'max_actions', 'max_repairs'}))
+            raise ValueError('Live agents require a real configured model. Configure the server provider.')
+        if approved is None:
+            context = body.model_dump(exclude={'mode', 'max_actions', 'max_repairs'})
+            def check_strategy(plan):
+                names = {m.name for m in body.modules}
+                if names and {m.module for m in plan.modules} != names: raise ValueError('Plan exactly the selected module names.')
+            strategy = await team.ask('QA supervisor', Strategy, context, check_strategy)
+            context['strategy'] = strategy.model_dump()
+            gaps.extend(strategy.gaps)
+            if body.explore_ui:
+                enriched = []
+                for module in body.modules:
+                    current = module.model_copy(deep=True)
+                    if module.figma_url:
+                        await team.event('Figma explorer', 'Running', f'Reading design evidence for {module.name}.')
+                        try:
+                            text, count, source_gaps = await read_design(module.figma_url)
+                            current.figma = (current.figma + '\n' + text).strip()
+                            gaps.extend(f'{module.name}: {g}' for g in source_gaps)
+                            await team.event('Figma explorer', 'Running', f'{module.name}: extracted {count} design nodes.')
+                        except ValueError as exc:
+                            gaps.append(f'{module.name}: {exc}')
+                        except Exception:
+                            gaps.append(f'{module.name}: Figma design API unavailable. Pasted design content remains usable.')
+                        try:
+                            explore_body = body.model_copy(update={'target_url': module.figma_url})
+                            observed, actions, browser_gaps = await explore(explore_body, team.ask, lambda e: team.event(**e))
+                            prefix = module.id + '-'
+                            for e in observed: e['id'] = prefix + e['id']; e['module'] = module.name
+                            for d in actions: d['evidence_id'] = prefix + d['evidence_id']
+                            evidence.extend(observed); decisions.extend(actions)
+                            gaps.extend(f'{module.name}: {g}' for g in browser_gaps)
+                        except Exception:
+                            gaps.append(f'{module.name}: prototype/browser exploration unavailable. Private or canvas-only designs require the API or an export.')
+                    else:
+                        gaps.append(f'{module.name}: no Figma URL; using pasted design evidence only.')
+                    enriched.append(current)
+                body = body.model_copy(update={'modules': enriched})
+                context.update(body.model_dump(exclude={'mode', 'max_actions', 'max_repairs'}))
+            else:
+                gaps.append('Figma links were not explored; generation uses per-module design text/exports and requirements.')
+            context['ui_evidence'] = evidence
+            context['existing_test_cases'] = [c.model_dump() for c in existing]
+            reqs = await team.ask('Requirements analyst', Requirements, context, lambda r: check_sources(r, body, evidence))
+            source_lines = inventory(body, reqs.requirements)
+            missing_lines = [row for row in source_lines if row['status'] != 'Linked']
+            if missing_lines:
+                await team.event('Requirements analyst', 'Repairing', f'Rechecking {len(missing_lines)} source lines without requirement links.')
+                reqs = await team.ask('Requirements analyst', Requirements, {**context, 'previous_requirements': reqs.model_dump(), 'unlinked_source_lines': missing_lines, 'instruction': 'Return the full corrected requirement set, including omitted relevant lines. Preserve valid requirements. Explain untestable or conflicting lines in questions.'}, lambda r: check_sources(r, body, evidence))
+            context['requirements'] = [r.model_dump() for r in reqs.requirements]
+            nav = await team.ask('Figma explorer', Navigation, context, lambda n: validate_references(reqs.requirements, n, [], evidence))
+            context['navigation_graph'] = nav.model_dump()
+            # Re-plan against analyzed requirements and observed navigation, before approval.
+            strategy = await team.ask('QA supervisor', Strategy, context, check_strategy)
+            context['strategy'] = strategy.model_dump()
+            return {'body': body.model_dump(), 'context': context, 'requirements': reqs.model_dump(),
+                    'navigation': nav.model_dump(), 'strategy': strategy.model_dump(),
+                    'gaps': gaps + strategy.gaps + reqs.questions + nav.questions, 'evidence': evidence,
+                    'decisions': decisions, 'trace': team.trace,
+                    'source_lines': inventory(body, reqs.requirements)}
         else:
-            gaps.append('Figma links were not explored; generation uses per-module design text/exports and requirements.')
-        context['ui_evidence'] = evidence
-        context['existing_test_cases'] = [c.model_dump() for c in existing]
-        reqs = await team.ask('Requirements analyst', Requirements, context, lambda r: check_sources(r, body, evidence))
-        source_lines = inventory(body, reqs.requirements)
-        missing_lines = [row for row in source_lines if row['status'] != 'Linked']
-        if missing_lines:
-            await team.event('Requirements analyst', 'Repairing', f'Rechecking {len(missing_lines)} source lines without requirement links.')
-            reqs = await team.ask('Requirements analyst', Requirements, {**context, 'previous_requirements': reqs.model_dump(), 'unlinked_source_lines': missing_lines, 'instruction': 'Return the full corrected requirement set, including omitted relevant lines. Preserve valid requirements. Explain untestable or conflicting lines in questions.'}, lambda r: check_sources(r, body, evidence))
-        context['requirements'] = [r.model_dump() for r in reqs.requirements]
-        nav = await team.ask('Figma explorer', Navigation, context, lambda n: validate_references(reqs.requirements, n, [], evidence))
-        context['navigation_graph'] = nav.model_dump()
+            from .models import QAInput
+            body = QAInput.model_validate(approved['body'])
+            context = dict(approved['context'])
+            reqs = Requirements.model_validate(approved['requirements'])
+            nav = Navigation.model_validate(approved['navigation'])
+            strategy = Strategy.model_validate(approved['strategy'])
+            evidence, decisions = approved['evidence'], approved['decisions']
+            gaps = list(approved['gaps'])
+            team.trace = list(approved['trace'])
+            context.update(requirements=reqs.model_dump()['requirements'],
+                           navigation_graph=nav.model_dump(), strategy=strategy.model_dump(),
+                           user_approved=True, user_edits=approved.get('user_edits', []))
         specs = [{'suite': 'Smoke', 'batch_label': 'Critical journeys and release blockers', 'requirements': context['requirements'], 'edges': [e.model_dump() for e in nav.edges]}]
         specs += [{'suite': 'Regression', 'batch_label': f"{g['module']} · batch {i+1}", **g} for i, g in enumerate(batches(reqs.requirements, nav))]
         for spec in specs:
@@ -193,6 +193,8 @@ async def run_plan(body, emit=noop, llm=None):
             spec = specs[index]
             # Each designer gets full source evidence but a bounded obligation batch.
             data = {**context, **spec}
+            data['imported_case_ids'] = [c.id for c in existing]
+            data['provenance_rules'] = 'existing_case_ids may ONLY cite imported_case_ids. previous_cases are generated drafts, not imported cases. Repairing a generated draft does not make origin Improved. When imported_case_ids is empty EVERY case must have origin New and existing_case_ids [].'
             if feedback:
                 data.update(repair_findings=[f.model_dump() for f in feedback], previous_cases=[c.model_dump() for c in outputs[index]])
             def validate(parsed):
@@ -212,7 +214,8 @@ async def run_plan(body, emit=noop, llm=None):
                         raise ValueError('Repair dropped previously linked obligations: ' + ', '.join(sorted(covered_before - covered_after)) + '. Preserve valid coverage while correcting the flagged assertions.')
                 existing_ids = {c.id for c in existing}
                 for c in parsed.cases:
-                    if set(c.existing_case_ids) - existing_ids: raise ValueError('Unknown existing case reference.')
+                    if set(c.existing_case_ids) - existing_ids:
+                        raise ValueError(f'Unknown imported case reference {c.existing_case_ids}. Allowed imported IDs: {sorted(existing_ids)}. previous_cases are generated drafts, not imports. Use origin=New and existing_case_ids=[] for newly generated or repaired drafts with no imported source.')
                     if (c.origin == 'Improved') != bool(c.existing_case_ids): raise ValueError('Improved cases must cite existing_case_ids; New cases must not.')
             parsed = await team.ask(spec['suite'] + ' designer', Cases, data, validate)
             outputs[index] = parsed.cases
