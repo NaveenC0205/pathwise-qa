@@ -1,5 +1,6 @@
 from functools import lru_cache
 from pathlib import Path
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 ROOT = Path(__file__).resolve().parents[2]
 class Settings(BaseSettings):
@@ -13,6 +14,12 @@ class Settings(BaseSettings):
     ollama_model: str = 'llama3.1:8b'
     llm_timeout_s: float = 120
     figma_access_token: str = ''
+    @field_validator('*', mode='before')
+    @classmethod
+    def strip_wrapping_quotes(cls, value):
+        if isinstance(value, str):
+            return value.strip().strip('"').strip("'")
+        return value
     @property
     def llm_model(self): return self.ollama_model if self.llm_provider == 'ollama' else self.openai_model
     @property

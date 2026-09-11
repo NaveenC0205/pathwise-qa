@@ -6,3 +6,7 @@ __pycache__/
 *.egg-info/
 frontend/dist/
 outputs/
+public/
+ui/
+.vercel
+.env*

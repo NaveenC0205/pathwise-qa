@@ -18,9 +18,11 @@ async def approved_run(body, emit=None, llm=None):
     state = await graph.ainvoke({'input': body.model_dump()}, cfg)
     analysis = state['analysis']
     return (await graph.ainvoke(Command(resume={'approved': True, 'requirements': analysis['requirements'], 'navigation': analysis['navigation'], 'strategy': analysis['strategy']}), cfg))['result']
-from app.qa.models import Case, ModuleInput
+from app.qa.models import Case, ModuleInput, Requirements, Requirement
 from app.qa.imports import import_cases
 from app.qa.browser import candidates, check_target
+from app.qa.manual import infer_types, implied_types, boundary_min_cases
+from app.qa.pipeline import check_sources
 
 
 def module(name='Catalog', story='Users can open a product.'):
@@ -53,6 +55,33 @@ def test_module_validation():
     with pytest.raises(ValueError): QAInput(modules=[module(), module()])
     with pytest.raises(ValueError): QAInput(modules=[{**module(), 'story': ''}])
     with pytest.raises(ValueError): QAInput(story='Valid story text', explore_ui=True, target_url='http://example.com', mode='offline')
+
+
+def test_manual_tester_infers_negative_and_boundary_types():
+    text = 'Quantity must be between 1 and 10.'
+    assert infer_types(text) == ['Functional', 'Negative', 'Boundary']
+    assert implied_types(text, ['Functional']) == ['Negative', 'Boundary']
+    assert boundary_min_cases(text) == 2
+    assert infer_types('Users can open a product.') == ['Functional']
+
+
+def test_requirements_must_include_implied_edge_types():
+    body = QAInput(modules=[{**module('Cart', 'Shopper can update cart quantity.'), 'success_criteria': 'Quantity must be between 1 and 10.'}])
+    reqs = Requirements(requirements=[Requirement(id='R1', module='Cart', text='Quantity limits', source='success_criteria', source_quote='Quantity must be between 1 and 10.', critical=False, required_types=['Functional'], rationale='Happy path only.')])
+    with pytest.raises(ValueError, match='Boundary'):
+        check_sources(reqs, body, [])
+
+
+@pytest.mark.asyncio
+async def test_offline_writes_manual_steps_and_split_edge_cases():
+    body = QAInput(modules=[{**module('Cart', 'Shopper can update cart quantity.'), 'success_criteria': 'Quantity must be between 1 and 10 inclusive.', 'navigation': 'Product → Cart'}], mode='offline')
+    result = await run_plan(body)
+    boundary = [c for c in result['cases'] if c['testing_type'] == 'Boundary']
+    assert len(boundary) >= 4
+    assert any('empty' in c['name'].lower() or 'cleared' in c['name'].lower() for c in boundary)
+    assert any(s['action'].startswith('On the ') for c in result['cases'] for s in c['steps'])
+    assert all(c['test_data'] for c in result['cases'])
+    assert result['coverage']['missing'] == 0
 
 
 def test_csv_import_mapping_and_formula_exclusion():

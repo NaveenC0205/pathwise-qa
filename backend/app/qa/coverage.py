@@ -1,4 +1,5 @@
 """Deterministic obligations: counted separately from semantic agent review."""
+from .manual import boundary_min_cases
 from .models import Finding
 
 
@@ -35,11 +36,12 @@ def validate_references(requirements, navigation, cases, evidence):
 
 def coverage_report(requirements, navigation, cases):
     obligations = []
-    def add(key, module, suite, target, typ, matches):
-        obligations.append({'id': key, 'module': module, 'suite': suite, 'target_id': target, 'testing_type': typ, 'case_ids': [c.id for c in matches], 'status': 'Linked' if matches else 'Missing', 'needs_clarification': any(c.status == 'Needs clarification' for c in matches)})
+    def add(key, module, suite, target, typ, matches, min_cases=1):
+        obligations.append({'id': key, 'module': module, 'suite': suite, 'target_id': target, 'testing_type': typ, 'case_ids': [c.id for c in matches], 'status': 'Linked' if len(matches) >= min_cases else 'Missing', 'needs_clarification': any(c.status == 'Needs clarification' for c in matches)})
     for r in requirements:
         for typ in dict.fromkeys(r.required_types):
-            add(f'{r.id}:{typ}', r.module, 'Regression', r.id, typ, [c for c in cases if c.suite == 'Regression' and r.id in c.requirement_ids and c.testing_type == typ])
+            matches = [c for c in cases if c.suite == 'Regression' and r.id in c.requirement_ids and c.testing_type == typ]
+            add(f'{r.id}:{typ}', r.module, 'Regression', r.id, typ, matches, min_cases=boundary_min_cases(r.text) if typ == 'Boundary' else 1)
         if r.critical:
             add(f'Smoke:{r.id}', r.module, 'Smoke', r.id, 'Functional', [c for c in cases if c.suite == 'Smoke' and r.id in c.requirement_ids])
     for e in navigation.edges:

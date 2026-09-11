@@ -109,3 +109,24 @@ async def test_retry_uses_previous_approval_without_reanalysis(tmp_path, monkeyp
     assert result['status'] == 'complete'
     assert result['result']['approved_at'] == approved_at
     assert not any(e['agent'] in ('QA supervisor', 'Requirements analyst') for e in events)
+
+
+@pytest.mark.asyncio
+async def test_approval_can_continue_without_server_checkpoint(tmp_path, monkeypatch):
+    from app.qa import workflow, pipeline
+    monkeypatch.setattr(pipeline, 'LLMRouter', lambda model: FakeRouter())
+    monkeypatch.setattr(workflow, 'DATABASE', tmp_path / 'first.sqlite')
+    analysis_run = await workflow.start(QAInput(modules=[module()]))
+    approval = Approval(
+        approved=True,
+        requirements=analysis_run['analysis']['requirements'],
+        navigation=analysis_run['analysis']['navigation'],
+        strategy=analysis_run['analysis']['strategy'],
+        input=analysis_run['input'],
+        analysis=analysis_run['analysis'],
+    )
+    monkeypatch.setattr(workflow, 'DATABASE', tmp_path / 'empty.sqlite')
+    result = await workflow.resume(str(uuid4()), approval)
+    assert result['status'] == 'complete'
+    assert result['result']['cases']
+

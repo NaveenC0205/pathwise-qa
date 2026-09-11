@@ -74,8 +74,10 @@ async def approve_run(run_id: str, body: Approval, request: Request):
         if saved['status'] != 'awaiting_approval':
             raise ValueError('This run is not awaiting approval.')
         workflow.validate_approval(saved['analysis'], body)
-    except ValueError as exc:
-        raise HTTPException(422, str(exc)) from exc
+    except ValueError:
+        if not (body.analysis and body.input):
+            raise HTTPException(422, 'This run is not awaiting approval.') from None
+        workflow.validate_approval(body.analysis, body)
     return streaming_response(request, lambda emit: workflow.resume(run_id, body, emit))
 
 

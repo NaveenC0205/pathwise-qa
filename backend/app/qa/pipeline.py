@@ -8,6 +8,7 @@ from .offline import draft
 from .browser import explore
 from .figma import read_design
 from .line_coverage import inventory
+from .manual import implied_types, MANUAL
 from app.llm import LLMRouter
 
 ROLES = ['QA supervisor', 'Requirements analyst', 'Figma explorer', 'Smoke designer', 'Regression designer', 'Coverage reviewer', 'Test plan writer']
@@ -65,6 +66,9 @@ def check_sources(reqs, body, evidence):
             raise ValueError(f'{r.id} source_quote must be an exact substring of its cited source.')
         if 'Functional' not in r.required_types:
             raise ValueError(f'{r.id} must include the Functional obligation.')
+        missing_types = implied_types(r.source_quote, r.required_types)
+        if missing_types:
+            raise ValueError(f'{r.id} must include {", ".join(missing_types)} so manual testers cover the edges implied by the source quote.')
 
 
 def batches(reqs, nav):
@@ -194,6 +198,8 @@ async def run_plan(body, emit=noop, llm=None, *, approved=None):
             # Each designer gets full source evidence but a bounded obligation batch.
             data = {**context, **spec}
             data['imported_case_ids'] = [c.id for c in existing]
+            data['tester_style'] = MANUAL
+            data['coverage_charter'] = 'Regression must cover every required_type as its own case. Numeric limits need separate valid-limit and invalid-limit Boundary cases (min, max, just below, just above, empty when the field can be cleared). Smoke stays a short happy-path walk a tester can execute before release.'
             data['provenance_rules'] = 'existing_case_ids may ONLY cite imported_case_ids. previous_cases are generated drafts, not imported cases. Repairing a generated draft does not make origin Improved. When imported_case_ids is empty EVERY case must have origin New and existing_case_ids [].'
             if feedback:
                 data.update(repair_findings=[f.model_dump() for f in feedback], previous_cases=[c.model_dump() for c in outputs[index]])

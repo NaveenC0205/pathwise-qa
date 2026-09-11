@@ -16,3 +16,5 @@ pythonpath = ["backend"]
 asyncio_mode = "auto"
 testpaths = ["tests"]
 addopts = "-q"
+[tool.vercel.scripts]
+build = "npm --prefix frontend ci && npm --prefix frontend run build && rm -rf ui && mkdir ui && cp -R frontend/dist/. ui/"

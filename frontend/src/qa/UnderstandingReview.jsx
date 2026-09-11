@@ -13,7 +13,7 @@ export default function UnderstandingReview({ pending, onApprove, disabled }) {
   const edgeField = (id, key, value) => update(d => ({ ...d, navigation: { ...d.navigation, edges: d.navigation.edges.map(e => e.id === id ? { ...e, [key]: value } : e) } }))
   return <section className="qa-understanding">
     <h2>Review what the agents understood</h2>
-    <p>No test cases have been generated. Edit the interpretation and proposed strategy below, then approve this saved analysis.</p>
+    <p>No test cases have been generated. Check that happy path, negative, and edge/boundary types look right, edit the interpretation, then approve this saved analysis.</p>
     <fieldset disabled={disabled}>
       <label>Overall application functionality<textarea value={draft.strategy.application_understanding} onChange={e => strategyField('application_understanding', e.target.value)} /></label>
       {[['smoke_approach', 'Proposed smoke journeys'], ['regression_approach', 'Proposed regression coverage']].map(([key, label]) => <label key={key}>{label}<textarea value={draft.strategy[key].join('\n')} onChange={e => strategyField(key, e.target.value.split('\n'))} /></label>)}

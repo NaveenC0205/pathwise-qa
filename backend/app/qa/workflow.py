@@ -1,5 +1,6 @@
 """Durable LangGraph workflow. No production fixture or template execution path."""
 import asyncio
+import os
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -16,7 +17,9 @@ from .models import StrictModel, QAInput, Requirements, Navigation, Strategy
 from .pipeline import run_plan, noop
 from .coverage import validate_references
 
-DATABASE = ROOT / 'outputs' / 'agent-checkpoints.sqlite'
+DATABASE = Path(os.environ['QA_CHECKPOINT_DB']) if os.environ.get('QA_CHECKPOINT_DB') else (
+    Path('/tmp/pathwise-qa/agent-checkpoints.sqlite') if os.environ.get('VERCEL') else ROOT / 'outputs' / 'agent-checkpoints.sqlite'
+)
 _locks = {}
 
 
@@ -26,6 +29,8 @@ class Approval(StrictModel):
     navigation: Navigation
     strategy: Strategy
     notes: str = Field(default='', max_length=10000)
+    input: dict = Field(default_factory=dict)
+    analysis: dict = Field(default_factory=dict)
 
 
 class State(TypedDict, total=False):
@@ -142,11 +147,34 @@ async def resume(run_id, approval, emit=noop):
     async with lock:
         async with stored_graph(emit) as graph:
             snapshot = await graph.aget_state(config(run_id))
-            if snapshot.next != ('human_approval',):
+            if snapshot.next == ('human_approval',):
+                validate_approval(snapshot.values['analysis'], approval)
+                await graph.ainvoke(Command(resume=approval.model_dump(exclude={'input', 'analysis'})), config(run_id))
+                return public_state(run_id, await graph.aget_state(config(run_id)))
+            if snapshot.values:
                 raise ValueError('This run is not awaiting approval. Start a new analysis if inputs changed.')
-            validate_approval(snapshot.values['analysis'], approval)
-            await graph.ainvoke(Command(resume=approval.model_dump()), config(run_id))
-            return public_state(run_id, await graph.aget_state(config(run_id)))
+        if approval.analysis and approval.input:
+            return await generate_approved(run_id, approval, emit)
+        raise ValueError('This run is not awaiting approval. Start a new analysis if inputs changed.')
+
+
+async def generate_approved(run_id, approval, emit=noop):
+    """Continue suite design when the serverless isolate no longer has the checkpoint."""
+    UUID(run_id)
+    validate_approval(approval.analysis, approval)
+    analysis = dict(approval.analysis)
+    analysis.update(requirements=approval.requirements.model_dump(),
+                    navigation=approval.navigation.model_dump(), strategy=approval.strategy.model_dump())
+    originals = {r['id']: r for r in approval.analysis['requirements']['requirements']}
+    analysis['user_edits'] = [{'requirement_id': r.id, 'original': originals[r.id]['text'], 'approved': r.text}
+                             for r in approval.requirements.requirements if r.text != originals[r.id]['text']]
+    analysis['approval_notes'] = approval.notes
+    analysis['context'] = {**analysis['context'], 'approval_notes': approval.notes,
+                           'instruction': 'Use the approved interpretation and strategy. User corrections override earlier interpretations. Unresolved questions remain gaps; do not invent answers.'}
+    approved_at = datetime.now(timezone.utc).isoformat()
+    result = await run_plan(QAInput.model_validate(approval.input), emit, approved=analysis)
+    result.update(framework='LangGraph', approved_at=approved_at, approved_understanding=analysis)
+    return {'run_id': run_id, 'status': 'complete', 'result': result, 'input': approval.input}
 
 
 async def retry(run_id, emit=noop):

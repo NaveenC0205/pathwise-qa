@@ -1,5 +1,6 @@
 """Transparent offline fixtures. Never impersonates live model reasoning."""
 import re
+from .manual import infer_types
 from .models import Requirement, Requirements, Edge, Journey, Navigation, Case, Step
 
 
@@ -21,12 +22,7 @@ def analyze(body):
                 for word in ('cart', 'checkout', 'payment', 'login', 'sign in', 'product', 'order'):
                     if word in line.lower():
                         module = word.title(); break
-            types = ['Functional']
-            if re.search(r'requir|invalid|must|cannot|only|denied', line, re.I): types.append('Negative')
-            if re.search(r'\d', line): types.append('Boundary')
-            if re.search(r'role|guest|sign in|permission|admin', line, re.I): types.append('Security')
-            if re.search(r'fail|retry|error', line, re.I): types.append('Recovery')
-            if re.search(r'preserv|retain|duplicate|reset', line, re.I): types.append('State')
+            types = infer_types(line)
             requirements.append(Requirement(id=f'R{len(requirements)+1:03}', module=module, text=line, source=source, source_quote=line, critical=source == 'story', required_types=types, rationale='Offline keyword classification; review applicability.'))
     if not requirements or len(requirements) > 100:
         raise ValueError('Use 1–100 requirement lines per offline run.')
@@ -69,36 +65,52 @@ def draft(body):
     cases = []
     def add(**kw):
         suite = kw['suite']; num = sum(c.suite == suite for c in cases) + 1
-        cases.append(Case(id=f"{'SMK' if suite == 'Smoke' else 'REG'}-{num:03}", role='Role from source; confirm test account', test_data=['Use an isolated test fixture that meets the source prerequisites.'], evidence_ids=[], status='Needs clarification', **kw))
+        cases.append(Case(id=f"{'SMK' if suite == 'Smoke' else 'REG'}-{num:03}", role='Role from source; confirm test account', evidence_ids=[], status='Needs clarification', **kw))
+    def scenario(r, typ, name, action, expected, data, assumption):
+        add(name=f'{r.module} — {name}'[:100], description=f'Manual {typ.lower()} check for source requirement {r.id}: {r.text}', module=r.module, suite='Regression', testing_type=typ, priority='P1' if r.critical else 'P2', level='Module', preconditions=[f'Start on the {r.module} screen with a known valid fixture.', 'No other tester is changing the same record.'], test_data=data, steps=[Step(action=action, expected_result=expected)], expected_result=expected, requirement_ids=[r.id], edge_ids=[], journey_ids=[], assumptions=[assumption])
     for r in reqs.requirements:
-        variants = [('Regression', typ) for typ in r.required_types] + ([('Smoke', 'Functional')] if r.critical else [])
-        for suite, typ in variants:
-            action = f'Exercise the stated behavior: {r.text}'
-            expected = f'Confirm the source criterion: {r.text}'
-            assumption = 'Confirm concrete controls, fixtures, and observable pass/fail assertions before execution.'
-            if typ == 'Negative':
-                action = f'Violate one prerequisite in: {r.text}'
-                expected = 'The invalid operation is rejected; verify the specified validation state and no unintended change.'
-                assumption = 'The exact invalid input and validation message need product confirmation.'
+        for typ in r.required_types:
+            if typ == 'Functional':
+                scenario(r, typ, f'happy path: {r.text[:70]}', f'On the {r.module} screen, complete the documented happy path using valid data for: {r.text}', f'The {r.module} screen shows the documented success state. Required values remain visible and the primary action completes.', ['Valid fixture that satisfies the source prerequisites.'], 'Confirm the exact control names and success message before execution.')
+            elif typ == 'Negative':
+                scenario(r, typ, f'invalid or missing input: {r.text[:55]}', f'On the {r.module} screen, attempt the action with one invalid or missing required value from: {r.text}', 'The invalid change is rejected. The previous valid state is unchanged. A validation state is shown if the source specifies one.', ['One invalid or blank value for a required field in the source.'], 'Confirm the exact invalid input and validation message with the product.')
             elif typ == 'Boundary':
-                numbers = re.findall(r'\b\d+(?:\.\d+)?\b', r.text)
-                action = f'Test the stated limit(s) {", ".join(numbers)} and adjacent valid/invalid values separately.'
-                expected = 'Each value is accepted or rejected according to the documented inclusive/exclusive limit.'
-                assumption = 'Split each boundary into separate executable cases; confirm units and inclusive limits.'
+                numbers = list(dict.fromkeys(re.findall(r'\b\d+(?:\.\d+)?\b', r.text)))
+                parsed = []
+                for raw in numbers:
+                    parsed.append(int(raw) if re.fullmatch(r'\d+', raw) else float(raw))
+                if len(parsed) >= 2:
+                    low, high = min(parsed), max(parsed)
+                    edges = [(low, 'minimum valid'), (high, 'maximum valid')]
+                    if all(isinstance(n, int) for n in (low, high)):
+                        edges += [(low - 1, 'just below minimum'), (high + 1, 'just above maximum')]
+                elif parsed:
+                    value = parsed[0]
+                    edges = [(value, 'stated limit')]
+                    if isinstance(value, int):
+                        edges += [(value - 1, 'just below stated limit'), (value + 1, 'just above stated limit')]
+                else:
+                    edges = []
+                for value, label in edges:
+                    accepted = 'below' not in label and 'above' not in label
+                    scenario(r, typ, f'{label} {value}', f'On the {r.module} screen, enter {value} ({label}) and attempt to continue.', f'{value} is accepted and the flow continues.' if accepted else f'{value} is rejected. The previous valid value remains. No unintended record is created.', [f'{label}: {value}'], 'Confirm whether the documented limit is inclusive and the exact validation text.')
+                scenario(r, typ, 'empty or cleared field', f'On the {r.module} screen, clear the constrained field and attempt to continue.', 'Blank input is rejected or the field is restored to a valid value. The previous valid state is unchanged.', ['Empty / cleared field'], 'Confirm required-vs-optional behavior if the source does not state it.')
             elif typ == 'Security':
-                action = f'Exercise the rule using both permitted and restricted test roles: {r.text}'
-                expected = 'Only the authorized role can perform the stated operation; the restricted role cannot bypass it.'
+                scenario(r, typ, f'unauthorized role: {r.text[:60]}', f'Attempt the {r.module} action as a restricted or unsigned-in role: {r.text}', 'The restricted role cannot complete the action or see the restricted data. The authorized role still can.', ['Permitted role and restricted/guest role'], 'Confirm the exact roles and denied-state presentation.')
             elif typ == 'Recovery':
-                action = f'Reproduce the documented failure and retry behavior: {r.text}'
-                expected = 'The documented recovery succeeds without additional unintended state changes.'
+                scenario(r, typ, f'failure and retry: {r.text[:60]}', f'On the {r.module} screen, reproduce the documented failure, then use the retry/continue control: {r.text}', 'The documented recovery succeeds. No extra record is created. The user can continue from a consistent state.', ['A fixture that can trigger the documented failure once'], 'Confirm the failure injection method and retry assertion.')
             elif typ == 'State':
-                action = f'Change the documented state, leave the screen, and return: {r.text}'
-                expected = r.text
-            add(name=f'{r.module} — {typ.lower()}: {r.text[:85]}', description=f'Validate the {typ.lower()} obligation for source requirement {r.id}.', module=r.module, suite=suite, testing_type=typ, priority='P1' if r.critical else 'P2', level='Module', preconditions=[f'Open the {r.module} module.', 'Prepare the documented account and initial application state.'], steps=[Step(action=action, expected_result=expected)], expected_result=expected, requirement_ids=[r.id], edge_ids=[], journey_ids=[], assumptions=[assumption])
+                scenario(r, typ, f'leave and return: {r.text[:60]}', f'Change the documented {r.module} state, navigate away or refresh, then return: {r.text}', 'The documented state is preserved or reset exactly as the source requires.', ['A changed in-progress record'], 'Confirm back, refresh and timeout behavior if unspecified.')
+            elif typ == 'Navigation':
+                scenario(r, typ, f'navigation: {r.text[:70]}', f'Follow the documented navigation for: {r.text}', 'The expected screen opens with its initial state.', ['Known starting screen from the source'], 'Confirm the control, route and role for this transition.')
+            else:
+                scenario(r, typ, f'{typ.lower()}: {r.text[:70]}', f'On the {r.module} screen, exercise the {typ.lower()} obligation: {r.text}', f'The observable {typ.lower()} outcome from the source is met.', ['Fixture that meets the source prerequisites.'], 'Confirm concrete controls and pass/fail assertions before execution.')
+        if r.critical:
+            add(name=f'{r.module} — smoke walk: {r.text[:70]}', description=f'Manual smoke walk of critical requirement {r.id}.', module=r.module, suite='Smoke', testing_type='Functional', priority='P0', level='Module', preconditions=[f'Start the release smoke pass on {r.module} with a valid account.'], test_data=['Valid happy-path fixture'], steps=[Step(action=f'Walk the documented happy path: {r.text}', expected_result=f'The critical {r.module} success state is visible and the tester can continue.')], expected_result=f'The critical criterion holds: {r.text}', requirement_ids=[r.id], edge_ids=[], journey_ids=[], assumptions=['Confirm controls and accounts used on the smoke pass.'])
     for e in nav.edges:
-        add(name=f'{e.origin} to {e.destination} — navigation', description=f'Validate the documented directed transition {e.id}.', module=e.module, suite='Regression', testing_type='Navigation', priority='P2', level='Module', preconditions=[f'User is on {e.origin}.'], steps=[Step(action=e.action, expected_result=f'{e.destination} is displayed with the expected route and initial state.')], expected_result=f'The user reaches {e.destination}.', requirement_ids=[], edge_ids=[e.id], journey_ids=[], assumptions=['Confirm exact navigation control, route, role, and destination assertions.'])
+        add(name=f'{e.origin} to {e.destination} — navigation', description=f'Manual navigation check for {e.id}.', module=e.module, suite='Regression', testing_type='Navigation', priority='P2', level='Module', preconditions=[f'The tester is on {e.origin} with the documented role.'], test_data=['Known record that can open this transition'], steps=[Step(action=e.action, expected_result=f'{e.destination} opens. The tester can see the expected starting state.')], expected_result=f'The tester reaches {e.destination}.', requirement_ids=[], edge_ids=[e.id], journey_ids=[], assumptions=['Confirm exact navigation control, route, role, and destination assertions.'])
     for j in nav.journeys:
         if not j.critical: continue
         edges = [next(e for e in nav.edges if e.id == eid) for eid in j.edge_ids]
-        add(name=f'Critical E2E — {j.name}', description='Smoke check of the complete supplied primary journey from entry to final destination.', module=j.module, suite='Smoke', testing_type='Functional', priority='P0', level='E2E', preconditions=[f'Start at {edges[0].origin} with valid test data.'], steps=[Step(action=e.action, expected_result=f'{e.destination} opens; verify its required screen state.') for e in edges], expected_result=f'The journey reaches {edges[-1].destination}.', requirement_ids=[], edge_ids=j.edge_ids, journey_ids=[j.id], assumptions=['Confirm controls, prerequisites, and business assertions for each transition; this template has not visited the UI.'])
+        add(name=f'Critical E2E — {j.name}', description='Manual smoke walk of the complete primary journey from entry to final destination.', module=j.module, suite='Smoke', testing_type='Functional', priority='P0', level='E2E', preconditions=[f'Start at {edges[0].origin} with valid test data.'], test_data=['Happy-path fixture for the full journey'], steps=[Step(action=e.action, expected_result=f'{e.destination} opens. Confirm the required fields and primary action on that screen.') for e in edges], expected_result=f'The tester reaches {edges[-1].destination} with the documented success state.', requirement_ids=[], edge_ids=j.edge_ids, journey_ids=[j.id], assumptions=['Confirm controls, prerequisites, and business assertions for each transition; this template has not visited the UI.'])
     return reqs, nav, cases
